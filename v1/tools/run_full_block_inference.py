@@ -27,7 +27,11 @@ def write_status(path, **values):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input-list", type=Path, required=True)
+    inputs = parser.add_mutually_exclusive_group(required=True)
+    inputs.add_argument("--input", type=Path,
+                        help="Single raw LAS, e.g. inference/input/input.las")
+    inputs.add_argument("--input-list", type=Path,
+                        help="TSV with group and raw LAS path per line")
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--work-root", type=Path, required=True)
     parser.add_argument("--python", type=Path, required=True)
@@ -43,12 +47,15 @@ def main():
     config = (args.config.resolve() if args.config else
               litept / "configs/gridnet/semseg-litept-small-gridnet-stage-b-las-blocks.py")
     verifier = litept / "tools/verify_block_prediction.py"
-    rows = []
-    for line in args.input_list.read_text(encoding="utf-8").splitlines():
-        if not line.strip() or line.lstrip().startswith("#"):
-            continue
-        group, source = line.split("\t", 1)
-        rows.append((group, Path(source).resolve()))
+    if args.input:
+        rows = [(args.input.parent.name, args.input.resolve())]
+    else:
+        rows = []
+        for line in args.input_list.read_text(encoding="utf-8").splitlines():
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            group, source = line.split("\t", 1)
+            rows.append((group, Path(source).resolve()))
 
     env = os.environ.copy()
     env.update(PYTHONPATH=str(litept), CUDA_VISIBLE_DEVICES=args.gpu,

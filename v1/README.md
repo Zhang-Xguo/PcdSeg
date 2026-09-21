@@ -108,6 +108,13 @@ CUDA_VISIBLE_DEVICES=0 python tools/test.py \
 
 ## 6. 新增原始 LAS 并输出完整 block 结果
 
+单场景最简用法：将原始点云放在 `inference/input/input.las`，可选的同点序标签
+真值放在 `inference/input/ground_truth.las`。运行后预测写入
+`inference/output/input/input.las`。真值不参与推理。命令及文件要求见
+[`inference/README.md`](inference/README.md)。
+
+处理多条线路或多个 block 时，可使用下面的输入清单方式。
+
 创建输入清单，每行是 `分组<TAB>LAS绝对路径`：
 
 ```text
