@@ -25,6 +25,25 @@ exp/                             训练和验证输出
 
 每个 tile 目录有 `coord.npy`（float32，N×3）、`color.npy`（原始 RGB，N×3）、`segment.npy`（0–6 或忽略值 255）。Stage B 另有 `supervision_weight.npy`。划分 JSON 存储相对于数据根目录的 tile 路径。固定划分的列表副本在 `splits/stage_b/`；它们仅是文件名清单，不含点云。训练前把相应 JSON 放进上面的数据根目录。
 
+## 权重获取与校验
+
+仓库不提交权重文件。**推理与交付只需要 Stage B 最优权重**，从 Release 下载后校验 SHA256：
+
+```bash
+mkdir -p checkpoints/spunet
+curl -L --fail -o checkpoints/spunet/spunet_stage_b_7class_model_best.pth \
+  https://github.com/Zhang-Xguo/PcdSeg/releases/download/spunet-stage-b-v1/spunet_stage_b_7class_model_best.pth
+echo "075b23cdfe42b336c5d266fde719800a311a9234439e77e6adedf025082cb8ed  checkpoints/spunet/spunet_stage_b_7class_model_best.pth" | sha256sum -c -
+```
+
+| 文件 | 用途 | 字节数 | SHA256 |
+| --- | --- | --- | --- |
+| `spunet_stage_b_7class_model_best.pth` | 推理与交付：Stage B 7 类最优权重，固定 88 tile 10-TTA mIoU 62.31% | 470093503 | `075b23cdfe42b336c5d266fde719800a311a9234439e77e6adedf025082cb8ed` |
+| `spunet_7class_public_stage_a/model/model_best.pth` | Stage A 最优权重；按后文命令自行训练复现，不随 Release 发布 | 470093503 | `10fedcb1405ca4bc8114389c7e287d0a1b1ca4291ee358dc5872be56990d4959` |
+| `scannet20_rgb3_7class_random_head.pth` | Stage A 初始化权重，由公开 ScanNet20 权重转换得到 | 156777914 | `6a315ae423b8772444393c798e37b4b2ab318fc6eaca1c6b85dd99ab316a8bc1` |
+
+三个文件都是 `dict(state_dict=..., epoch=..., optimizer=...)` 形式的 checkpoint；模型结构与 7 类顺序必须与 checkpoint 一致，否则加载会失败。`configs/*.py` 里的 `weight` 默认指向 `exp/` 下的训练输出，换机器时要改成本地实际路径，或直接用 `--weight` 覆盖（`scripts/profile_spunet_val_blocks.py`、`scripts/run_full_block_inference.py`、`tools/benchmark_inference.py` 均支持）。
+
 ## 数据准备
 
 公开 GridNet-HD 原始 LAS 应有 `ground_truth` 字段。下面的脚本把官方类别先映射为项目的 7 类，再按 20 m tile、10 m 步长切分：
@@ -98,6 +117,8 @@ CUDA_VISIBLE_DEVICES=4 python tools/test.py \
   --config-file configs/stage_b_eval.py --num-gpus 1 \
   --options save_path=exp/spunet_stage_b_eval
 ```
+
+`configs/deploy_profile/` 下有 `stage_b_eval_{1,2,10}tta.py` 三个部署剖面配置，分别用单视图、2 视图（恒等 + 翻转）和 10 组测试增强，用于对比不同增强档位的速度与精度；三者只覆盖 `save_path` 和 `data.test.test_cfg.aug_transform`。
 
 默认使用 10 组测试增强并输出 tile 预测 `result/*_pred.npy`。如需逐类 Precision、Recall、IoU 和混淆矩阵：
 
