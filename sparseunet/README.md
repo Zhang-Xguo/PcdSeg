@@ -124,6 +124,8 @@ python scripts/evaluate_spunet_full_blocks.py \
 
 ## 完整原始 block 的 LAS 输出
 
+单场景示例可将原始点云放到 `inference/input/input.las`，输出写到 `inference/output/`；目录结构和完整命令见 [`inference/README.md`](inference/README.md)。
+
 ```bash
 CUDA_VISIBLE_DEVICES=4 python scripts/run_full_block_inference.py \
   --inputs /data/raw/line_a_Block_0.las \
