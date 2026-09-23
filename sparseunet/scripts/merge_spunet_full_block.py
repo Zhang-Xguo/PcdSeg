@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from pathlib import Path
 
 import laspy
@@ -17,7 +18,10 @@ def main() -> None:
     ap.add_argument("--result-dir", type=Path, required=True)
     ap.add_argument("--output", type=Path, required=True)
     ap.add_argument("--max-missing-fallback", type=int, default=10)
+    ap.add_argument("--prediction-field", default="classif")
+    ap.add_argument("--timing-output", type=Path)
     args = ap.parse_args()
+    post_start = time.perf_counter()
     meta = json.loads(args.metadata.read_text())
     source = Path(meta["source_las"])
     n = int(meta["num_points"])
@@ -50,14 +54,18 @@ def main() -> None:
             raise ValueError("Original LAS point count changed")
         original_dims = list(reader.header.point_format.dimension_names)
     las = laspy.read(source)
-    if "classif" in original_dims:
-        raise ValueError("Original LAS already has classif; refusing to overwrite it")
+    if args.prediction_field in original_dims:
+        raise ValueError(f"Original LAS already has {args.prediction_field}; refusing to overwrite it")
     las.add_extra_dim(laspy.ExtraBytesParams(
-        name="classif", type=np.uint8, description="SpUNet 7-class prediction 0-6"))
-    las.classif = labels
+        name=args.prediction_field, type=np.uint8,
+        description="SpUNet 7-class prediction 0-6"))
+    las[args.prediction_field] = labels
     args.output.parent.mkdir(parents=True, exist_ok=True)
     temp = args.output.with_name(args.output.stem + ".partial.las")
+    post_seconds = time.perf_counter() - post_start
+    write_start = time.perf_counter()
     las.write(temp)
+    write_seconds = time.perf_counter() - write_start
     del las
     # Read back and compare every original dimension, including RGB, intensity,
     # standard classification, and any source ExtraBytes, in source point order.
@@ -71,16 +79,26 @@ def main() -> None:
             for dim in original_dims:
                 if not np.array_equal(np.asarray(raw[dim]), np.asarray(out[dim])):
                     raise ValueError(f"Original dimension changed: {dim}")
-            if np.any(np.asarray(out["classif"]) > 6):
-                raise ValueError("Output classif outside 0-6")
+            if np.any(np.asarray(out[args.prediction_field]) > 6):
+                raise ValueError(f"Output {args.prediction_field} outside 0-6")
+    verify_seconds = time.perf_counter() - write_start - write_seconds
     temp.replace(args.output)
     report = {
         "source": str(source), "output": str(args.output),
         "points": n, "tiles": len(meta["chunks"]),
         "boundary_fallback_points": missing, "original_dimensions_verified": original_dims,
-        "class_field": "classif", "class_counts": np.bincount(labels, minlength=7).tolist(),
+        "class_field": args.prediction_field,
+        "class_counts": np.bincount(labels, minlength=7).tolist(),
     }
     args.output.with_suffix(".audit.json").write_text(json.dumps(report, indent=2) + "\n")
+    timing = {
+        "T_postprocess_ms": 1000.0 * post_seconds,
+        "T_write_ms": 1000.0 * write_seconds,
+        "T_verify_ms": 1000.0 * verify_seconds,
+    }
+    if args.timing_output:
+        args.timing_output.parent.mkdir(parents=True, exist_ok=True)
+        args.timing_output.write_text(json.dumps(timing, indent=2) + "\n")
     print(json.dumps(report, indent=2), flush=True)
 
 

@@ -122,6 +122,19 @@ python scripts/evaluate_spunet_full_blocks.py \
 
 脚本使用与 Stage B 预处理完全相同的 11→7 类映射，输出整体、逐类、逐场景的 IoU、Precision、Recall、混淆矩阵，并另外统计仅人工标签点的辅助指标。
 
+## 可复用的完整场景 benchmark
+
+`tools/benchmark_inference.py` 对目录内每个 LAS block 执行正式单尺度推理，保留原始全部点和字段，并新增 `pred_classif:uint8`。真值字段优先读取 `classif`，不存在时读取标准 `classification`；真值 0–6 参与指标，7 作为 ignore。程序默认对语料运行 3 轮，并按有效体素数的 P20/P40/P60/P80 固定划分 S/M/L/XL/XXL；每个规模桶另选代表场景完成 5 次预热和至少 10 次纯模型前向微基准。
+
+```bash
+CUDA_VISIBLE_DEVICES=4 python tools/benchmark_inference.py \
+  --input-dir /data/500kv_seg \
+  --weight exp/gridnethd/spunet_7class_stage_b_las_new_blocks/model/model_best.pth \
+  --output exp/spunet_500kv_benchmark --gpu 4
+```
+
+输出包含 `benchmark_config.yaml`、`benchmark_manifest.csv`、逐 block×轮次 CSV、精度与混淆矩阵 JSON、规模汇总、微基准、校验结果、五张趋势图和 `benchmark_report.md`。阶段耗时分别记录 LAS 读取、预处理、CPU→GPU、CUDA Event 模型前向、后处理和最终 LAS 写盘；初始化单列，不计入 pipeline。每个 block 只保留第 1 轮的 `predictions/<block>/prediction.las`，后两轮仍完整执行和校验但不重复保存，防止测速轮次扩大交付体积。
+
 ## 完整原始 block 的 LAS 输出
 
 单场景示例可将原始点云放到 `inference/input/input.las`，输出写到 `inference/output/`；目录结构和完整命令见 [`inference/README.md`](inference/README.md)。

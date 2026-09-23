@@ -42,6 +42,9 @@ def main() -> None:
                         help="Infer unlabeled full-scene tiles without tile metrics")
     parser.add_argument("--single-scale", action="store_true",
                         help="Use one identity test augmentation for faster full-scene export")
+    parser.add_argument("--warmup-iters", type=int, default=0)
+    parser.add_argument("--raw-points", type=int,
+                        help="Track unique source points reaching the model")
     args = parser.parse_args()
     started = time.perf_counter()
     cfg = Config.fromfile(str(args.config))
@@ -71,11 +74,31 @@ def main() -> None:
     setup_seconds = now() - setup_start
 
     times = {key: 0.0 for key in (
-        "data_read", "preprocess", "fragment_collate_transfer",
+        "data_read", "preprocess", "fragment_collate", "h2d",
         "model_forward", "score_accumulate", "label_recovery", "save_prediction")}
     points = 0
     fragments = 0
+    processed_voxel_instances = 0
+    chunk_voxels = []
+    active_source = (np.zeros(args.raw_points, dtype=np.bool_)
+                     if args.raw_points is not None else None)
     n = len(dataset) if args.limit is None else min(args.limit, len(dataset))
+
+    # Representative real fragment warm-up. Its preparation, transfer and
+    # forwards are intentionally outside every reported inference timer.
+    if args.warmup_iters:
+        warm = dataset.prepare_test_data(min(n // 2, n - 1))
+        fragment = max(warm["fragment_list"], key=lambda x: len(x["index"]))
+        warm_input = collate_fn([fragment])
+        for key, value in warm_input.items():
+            if isinstance(value, torch.Tensor):
+                warm_input[key] = value.cuda(non_blocking=True)
+        torch.cuda.synchronize()
+        with torch.inference_mode():
+            for _ in range(args.warmup_iters):
+                model(warm_input)
+        torch.cuda.synchronize()
+        del warm, fragment, warm_input
     torch.cuda.reset_peak_memory_stats()
     inference_started = now()
 
@@ -105,28 +128,48 @@ def main() -> None:
         segment = data_dict.pop("segment")
         name = data_dict.pop("name")
         pred = torch.zeros((segment.size, cfg.data.num_classes), device="cuda")
+        original_index = None
+        if active_source is not None:
+            original_index = np.load(
+                Path(cfg.data.test.data_root) / str(cfg.data.test.split).rsplit("/", 1)[0]
+                / name / "original_index.npy", mmap_mode="r") if "/" in str(cfg.data.test.split) else np.load(
+                Path(cfg.data.test.data_root) / "test_final" / name / "original_index.npy",
+                mmap_mode="r")
         for fragment in fragment_list:
-            t = now()
+            t = time.perf_counter()
             input_dict = collate_fn([fragment])
+            times["fragment_collate"] += time.perf_counter() - t
+            cpu_index = np.asarray(input_dict["index"], dtype=np.int64)
+            if original_index is not None:
+                active_source[np.asarray(original_index[cpu_index], dtype=np.int64)] = True
+            t = now()
             for key, value in input_dict.items():
                 if isinstance(value, torch.Tensor):
                     input_dict[key] = value.cuda(non_blocking=True)
             t1 = now()
-            times["fragment_collate_transfer"] += t1 - t
+            times["h2d"] += t1 - t
 
             index = input_dict["index"]
-            with torch.no_grad():
+            start_event = torch.cuda.Event(enable_timing=True)
+            end_event = torch.cuda.Event(enable_timing=True)
+            start_event.record()
+            with torch.inference_mode():
                 logits = model(input_dict)["seg_logits"]
-            t2 = now()
-            times["model_forward"] += t2 - t1
+            end_event.record()
+            end_event.synchronize()
+            times["model_forward"] += start_event.elapsed_time(end_event) / 1000.0
+            t2 = time.perf_counter()
+            voxels = int(logits.shape[0])
+            processed_voxel_instances += voxels
+            chunk_voxels.append(voxels)
 
             probs = F.softmax(logits, dim=-1)
             begin = 0
             for end in input_dict["offset"]:
                 pred[index[begin:end], :] += probs[begin:end]
                 begin = end
-            t3 = now()
-            times["score_accumulate"] += t3 - t2
+            torch.cuda.synchronize()
+            times["score_accumulate"] += time.perf_counter() - t2
         fragments += len(fragment_list)
 
         t = now()
@@ -160,6 +203,15 @@ def main() -> None:
         "tiles": n,
         "points": points,
         "fragments": fragments,
+        "num_chunks": fragments,
+        "processed_voxel_instances": processed_voxel_instances,
+        "active_voxels": (int(active_source.sum()) if active_source is not None else None),
+        "chunk_voxels": {
+            "min": int(min(chunk_voxels)) if chunk_voxels else 0,
+            "mean": float(np.mean(chunk_voxels)) if chunk_voxels else 0.0,
+            "max": int(max(chunk_voxels)) if chunk_voxels else 0,
+        },
+        "warmup_iters": args.warmup_iters,
         "setup_seconds": setup_seconds,
         "inference_seconds": inference_seconds,
         "phase_seconds": times,
@@ -169,6 +221,7 @@ def main() -> None:
         "total_wall_seconds": time.perf_counter() - started,
         "points_per_inference_second": points / inference_seconds,
         "peak_gpu_memory_mib": torch.cuda.max_memory_allocated() / 1024**2,
+        "peak_gpu_reserved_mib": torch.cuda.max_memory_reserved() / 1024**2,
         "metrics": metrics["overall"] if metrics else None,
         "timing_note": (
             "Single-process, one-GPU test with CUDA synchronization at phase "

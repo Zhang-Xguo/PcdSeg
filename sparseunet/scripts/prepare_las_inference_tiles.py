@@ -8,6 +8,7 @@ loading the whole cloud or scanning it once per window.  Every tile carries an
 
 import argparse
 import json
+import time
 from pathlib import Path
 
 import laspy
@@ -28,6 +29,7 @@ def parse_args():
     p.add_argument("--chunk-size", type=float, default=20.0)
     p.add_argument("--stride", type=float, default=10.0)
     p.add_argument("--read-points", type=int, default=2_000_000)
+    p.add_argument("--timing-output", type=Path)
     return p.parse_args()
 
 
@@ -80,6 +82,8 @@ def finalize_bin(bin_path, out_dir, copy_block=2_000_000):
 
 def main():
     args = parse_args()
+    wall_start = time.perf_counter()
+    load_seconds = 0.0
     src = Path(args.input).resolve()
     root = Path(args.output_root).resolve()
     split_root = root / "test_final"
@@ -101,7 +105,15 @@ def main():
         ny = max(0, int(np.ceil(max(0.0, span[1] - args.chunk_size) / args.stride)))
         cursor = 0
         touched = set()
-        for points in reader.chunk_iterator(args.read_points):
+        iterator = iter(reader.chunk_iterator(args.read_points))
+        while True:
+            load_start = time.perf_counter()
+            try:
+                points = next(iterator)
+            except StopIteration:
+                load_seconds += time.perf_counter() - load_start
+                break
+            load_seconds += time.perf_counter() - load_start
             n = len(points)
             xyz = np.column_stack((points.x, points.y, points.z)).astype(np.float64)
             coord = (xyz - mins).astype(np.float32)
@@ -176,6 +188,20 @@ def main():
     )
     meta_path = root / f"{src.stem}_metadata.json"
     meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    wall_seconds = time.perf_counter() - wall_start
+    timing = {
+        "T_load_ms": 1000.0 * load_seconds,
+        "T_preprocess_ms": 1000.0 * (wall_seconds - load_seconds),
+        "T_prepare_wall_ms": 1000.0 * wall_seconds,
+        "raw_points": n_source,
+        "configured_chunk_size": args.chunk_size,
+        "stride": args.stride,
+        "spatial_tiles": len(chunks),
+        "tile_point_instances": total_tile_points,
+    }
+    if args.timing_output:
+        args.timing_output.parent.mkdir(parents=True, exist_ok=True)
+        args.timing_output.write_text(json.dumps(timing, indent=2) + "\n")
     print(f"tiles={len(chunks):,} copies={total_tile_points:,} ratio={total_tile_points/n_source:.3f}")
     print(f"metadata={meta_path}")
 
