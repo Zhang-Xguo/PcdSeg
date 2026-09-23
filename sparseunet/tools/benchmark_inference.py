@@ -138,10 +138,17 @@ def main():
     env = os.environ.copy(); env.update(CUDA_VISIBLE_DEVICES=args.gpu, PYTHONPATH=str(repo),
         OMP_NUM_THREADS="1", MKL_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1",
         NUMEXPR_NUM_THREADS="1", PYTHONHASHSEED="42")
+    partial_path = output / "benchmark_rows.partial.jsonl"
     rows = []
+    if partial_path.is_file():
+        rows = [json.loads(line) for line in partial_path.read_text().splitlines() if line.strip()]
+    completed = {(r["round"], r["block"]) for r in rows}
 
     for round_id in range(1, args.rounds + 1):
         for block_index, source in enumerate(inputs, 1):
+            if (round_id, source.stem) in completed:
+                print(f"resume: skip round {round_id}/{args.rounds} block {block_index}/{len(inputs)} {source.stem}", flush=True)
+                continue
             block_start = time.perf_counter()
             block = source.stem; work = output / "work" / f"round_{round_id}" / block
             data = work / "data"; inference = work / "inference"; result = inference / "result"
@@ -194,12 +201,21 @@ def main():
                    "active_voxel_mpts_per_s": active / t_fwd / 1000,
                    "forward_ms_per_100k_voxels": t_fwd / processed * 100000,
                    "pipeline_ms_per_100k_raw_points": t_pipeline / raw * 100000,
+                   "forward_ms_per_standard_tile": t_fwd / prep["spatial_tiles"],
+                   "pipeline_ms_per_standard_tile": t_pipeline / prep["spatial_tiles"],
+                   "e2e_ms_per_standard_tile": t_e2e / prep["spatial_tiles"],
+                   "standard_tiles_per_forward_second": prep["spatial_tiles"] / t_fwd * 1000,
+                   "standard_tiles_per_pipeline_second": prep["spatial_tiles"] / t_pipeline * 1000,
                    "peak_gpu_allocated_gb": prof["peak_gpu_memory_mib"] / 1024,
                    "peak_gpu_reserved_gb": prof["peak_gpu_reserved_mib"] / 1024,
                    "status": "OK", "wall_ms_including_init_verify": 1000*(time.perf_counter()-block_start),
                    "confusion_matrix": cm.tolist(),
                    "prediction": str(retained_prediction) if round_id == 1 else ""}
             rows.append(row)
+            with partial_path.open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(row, ensure_ascii=False) + "\n")
+                stream.flush()
+                os.fsync(stream.fileno())
             print(f"round {round_id}/{args.rounds} block {block_index}/{len(inputs)} {block} forward={t_fwd:.1f}ms", flush=True)
             shutil.rmtree(work)
 
@@ -227,7 +243,9 @@ def main():
     with (output / "benchmark_per_block.csv").open("w",newline="",encoding="utf-8-sig") as f:
         w=csv.DictWriter(f,fieldnames=csv_fields);w.writeheader();w.writerows({k:r[k] for k in csv_fields} for r in rows)
 
-    timing_keys=["T_preprocess_ms","T_h2d_ms","T_forward_ms","T_postprocess_ms","T_pipeline_ms","T_e2e_ms"]
+    timing_keys=["T_preprocess_ms","T_h2d_ms","T_forward_ms","T_postprocess_ms","T_pipeline_ms","T_e2e_ms",
+                 "forward_ms_per_standard_tile","pipeline_ms_per_standard_tile","e2e_ms_per_standard_tile",
+                 "standard_tiles_per_forward_second","standard_tiles_per_pipeline_second"]
     summary={}
     for group in ["ALL","S","M","L","XL","XXL"]:
         subset=rows if group=="ALL" else [r for r in rows if r["bucket"]==group]
@@ -236,6 +254,14 @@ def main():
     reg_active=regression([r["active_voxels"] for r in rows],[r["T_forward_ms"] for r in rows])
     reg_processed=regression([r["processed_voxel_instances"] for r in rows],[r["T_forward_ms"] for r in rows])
     summary["scaling_regression"]={"active_voxels":reg_active,"processed_voxel_instances":reg_processed}
+    total_tiles = sum(r["spatial_tiles"] for r in rows)
+    summary["standard_tile_weighted"] = {
+        "definition": "20m x 20m XY window with 10m stride",
+        "standard_tile_instances": total_tiles,
+        "forward_ms_per_tile": sum(r["T_forward_ms"] for r in rows) / total_tiles,
+        "pipeline_ms_per_tile": sum(r["T_pipeline_ms"] for r in rows) / total_tiles,
+        "e2e_ms_per_tile": sum(r["T_e2e_ms"] for r in rows) / total_tiles,
+    }
 
     total_cm=np.sum([np.asarray(r["confusion_matrix"],dtype=np.int64) for r in first],axis=0)
     accuracy=metric_report(total_cm)
@@ -311,6 +337,7 @@ def main():
       f"- End-to-End P50/P95: {allsum['T_e2e_ms']['p50']:.2f} / {allsum['T_e2e_ms']['p95']:.2f} ms",
       f"- Model throughput mean: {np.mean([r['voxel_mpts_per_s'] for r in rows]):.3f} M processed voxels/s",
       f"- Pipeline throughput mean: {np.mean([r['raw_mpts_per_s'] for r in rows]):.3f} M raw points/s",
+      f"- Weighted standard-tile forward/pipeline/E2E: {summary['standard_tile_weighted']['forward_ms_per_tile']:.2f} / {summary['standard_tile_weighted']['pipeline_ms_per_tile']:.2f} / {summary['standard_tile_weighted']['e2e_ms_per_tile']:.2f} ms per 20m window",
       f"- Peak GPU allocated/reserved: {max(r['peak_gpu_allocated_gb'] for r in rows):.3f} / {max(r['peak_gpu_reserved_gb'] for r in rows):.3f} GB",
       f"- Scaling slope: {reg_processed['slope_ms_per_100k']:.3f} ms / 100k processed voxels (R²={reg_processed['r2']:.4f})","",
       "## Accuracy","",f"Overall accuracy {accuracy['accuracy']:.4%}; macro IoU {accuracy['macro_iou']:.4%}; macro Precision {accuracy['macro_precision']:.4%}; macro Recall {accuracy['macro_recall']:.4%}.",
@@ -330,6 +357,7 @@ def main():
       "- `T_postprocess`: score accumulation, label recovery, source-index voting and output record construction.",
       "- `T_write`: final LAS disk write. `T_init` is reported separately and excluded from pipeline/E2E.",
       "- `T_pipeline = preprocess + h2d + forward + postprocess`; `T_e2e = load + pipeline + write`.",
+      "- A standard tile is one fixed 20m x 20m XY inference window at 10m stride. Weighted ms/tile is total time divided by total tile instances across all block-runs; point/voxel-normalized columns remain available for density-aware comparison.",
       "","## Consistency checks","","```json",json.dumps(checks,indent=2),"```", "", "Values 7 in input ground truth are ignored. Prediction is written to `pred_classif`; original `classif`/`classification` is preserved."]
     (output/"benchmark_report.md").write_text("\n".join(report)+"\n")
     (output/"validation_checks.json").write_text(json.dumps(checks,indent=2)+"\n")
