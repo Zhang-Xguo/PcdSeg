@@ -1,8 +1,10 @@
 # PcdSeg
 
-输电线路点云语义分割代码版本库。`v1/` 是当前 LitePT-S、XYZ+RGB、7 类版本，
-包含 LAS 数据预处理、训练、验证、完整 block 推理、重叠 tile 投票合并、着色和结果校验。
+输电线路点云语义分割代码版本库，包含两个并列的 7 类 Python 方案：
+
+- [`v1/`](v1/README.md)：LitePT-S，XYZ+RGB；
+- [`sparseunet/`](sparseunet/README.md)：Pointcept SpUNet-v1m1，包含公共数据预训练、自建数据微调、固定验证和保留原始属性的完整 LAS block 推理。
 
 本仓库只保存源码与配置，不保存数据集、模型权重、推理结果或编译产物。
 
-详见 [`v1/README.md`](v1/README.md)。
+具体数据格式、环境和运行命令见各方案目录下的 README。

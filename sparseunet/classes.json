@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "model": "SpUNet-v1m1 7-class Stage B",
+  "class_field": "classif",
+  "ignore_label": 255,
+  "classes": [
+    {"id": 0, "name": "tower", "rgb": [243, 214, 171]},
+    {"id": 1, "name": "conductor", "rgb": [255, 140, 0]},
+    {"id": 2, "name": "insulator", "rgb": [243, 238, 0]},
+    {"id": 3, "name": "vegetation", "rgb": [46, 125, 50]},
+    {"id": 4, "name": "building", "rgb": [190, 100, 153]},
+    {"id": 5, "name": "ground", "rgb": [190, 160, 90]},
+    {"id": 6, "name": "other", "rgb": [70, 140, 190]}
+  ]
+}

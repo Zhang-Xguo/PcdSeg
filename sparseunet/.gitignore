@@ -1,0 +1,8 @@
+data/
+exp/
+outputs/
+work/
+checkpoints/
+*.safetensors
+__pycache__/
+*.py[cod]

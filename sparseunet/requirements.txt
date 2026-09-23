@@ -1,0 +1,19 @@
+# Validated baseline: Linux, Python 3.8, PyTorch 2.1.0/CUDA 12.1.
+# Install a PyTorch build compatible with the local driver first.
+torch==2.1.0
+spconv-cu120==2.3.6
+torch-geometric==2.3.0
+timm==1.0.29
+numpy==1.24.4
+scipy==1.10.1
+laspy==2.5.4
+lazrs==0.6.2
+safetensors>=0.4,<1
+addict==2.4.0
+PyYAML==6.0.3
+yapf==0.43.0
+regex==2024.11.6
+termcolor==2.4.0
+tqdm==4.67.1
+tensorboardX==2.6.2.2
+SharedArray==3.2.4
