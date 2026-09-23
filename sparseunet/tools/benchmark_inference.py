@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import platform
+import queue
 import shutil
 import subprocess
 import sys
@@ -275,26 +276,37 @@ def main():
         source_map={p.stem:p for p in inputs}
         micro_jobs = []
         micro_gpus = (args.micro_gpus or args.gpu).split(",")
-        for job_index, (bucket,block) in enumerate(representatives.items()):
+        for bucket,block in representatives.items():
+            report=output/"micro"/f"{bucket}.json"
+            if report.is_file():
+                micro[bucket] = json.loads(report.read_text())
+                print(f"resume: skip completed micro bucket {bucket}", flush=True)
+                continue
             source=source_map[block]; work=output/"micro_work"/bucket; data=work/"data"
             run([sys.executable,repo/"scripts/prepare_las_inference_tiles.py","--input",source,
                  "--output-root",data],repo,env,work/"prepare.log")
             meta=json.loads((data/f"{block}_metadata.json").read_text()); split=data/"micro_split.json"
             split.write_text(json.dumps([f"test_final/{x['chunk']}" for x in meta["chunks"]])+"\n")
-            report=output/"micro"/f"{bucket}.json"
-            micro_jobs.append((bucket, work, data, split, report,
-                               micro_gpus[job_index % len(micro_gpus)]))
+            micro_jobs.append((bucket, work, data, split, report))
+
+        available_gpus = queue.Queue()
+        for gpu in micro_gpus:
+            available_gpus.put(gpu)
 
         def run_micro(job):
-            bucket, work, data, split, report, gpu = job
-            task_env = env.copy(); task_env["CUDA_VISIBLE_DEVICES"] = gpu
-            run([sys.executable,repo/"scripts/micro_benchmark_spunet.py","--weight",weight,
-                 "--data-root",data,"--split",split.name,"--output",report],
-                repo,task_env,work/"micro.log")
-            result = json.loads(report.read_text()); result["physical_gpu"] = gpu
-            report.write_text(json.dumps(result, indent=2) + "\n")
-            shutil.rmtree(work)
-            return bucket, result
+            bucket, work, data, split, report = job
+            gpu = available_gpus.get()
+            try:
+                task_env = env.copy(); task_env["CUDA_VISIBLE_DEVICES"] = gpu
+                run([sys.executable,repo/"scripts/micro_benchmark_spunet.py","--weight",weight,
+                     "--data-root",data,"--split",split.name,"--output",report],
+                    repo,task_env,work/"micro.log")
+                result = json.loads(report.read_text()); result["physical_gpu"] = gpu
+                report.write_text(json.dumps(result, indent=2) + "\n")
+                shutil.rmtree(work)
+                return bucket, result
+            finally:
+                available_gpus.put(gpu)
 
         with ThreadPoolExecutor(max_workers=len(micro_gpus)) as pool:
             futures = [pool.submit(run_micro, job) for job in micro_jobs]
