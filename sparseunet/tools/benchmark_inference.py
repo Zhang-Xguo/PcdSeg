@@ -13,6 +13,7 @@ import subprocess
 import sys
 import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import laspy
@@ -129,6 +130,8 @@ def main():
     ap.add_argument("--warmup-iters", type=int, default=5)
     ap.add_argument("--smoke-limit", type=int)
     ap.add_argument("--skip-micro", action="store_true")
+    ap.add_argument("--micro-gpus", default=None,
+                    help="Comma-separated identical GPUs used for parallel single-GPU micro runs")
     args = ap.parse_args()
     repo = Path(__file__).resolve().parents[1]
     output = args.output.resolve(); output.mkdir(parents=True, exist_ok=True)
@@ -270,16 +273,34 @@ def main():
     micro={}
     if not args.skip_micro:
         source_map={p.stem:p for p in inputs}
-        for bucket,block in representatives.items():
+        micro_jobs = []
+        micro_gpus = (args.micro_gpus or args.gpu).split(",")
+        for job_index, (bucket,block) in enumerate(representatives.items()):
             source=source_map[block]; work=output/"micro_work"/bucket; data=work/"data"
             run([sys.executable,repo/"scripts/prepare_las_inference_tiles.py","--input",source,
                  "--output-root",data],repo,env,work/"prepare.log")
             meta=json.loads((data/f"{block}_metadata.json").read_text()); split=data/"micro_split.json"
             split.write_text(json.dumps([f"test_final/{x['chunk']}" for x in meta["chunks"]])+"\n")
             report=output/"micro"/f"{bucket}.json"
+            micro_jobs.append((bucket, work, data, split, report,
+                               micro_gpus[job_index % len(micro_gpus)]))
+
+        def run_micro(job):
+            bucket, work, data, split, report, gpu = job
+            task_env = env.copy(); task_env["CUDA_VISIBLE_DEVICES"] = gpu
             run([sys.executable,repo/"scripts/micro_benchmark_spunet.py","--weight",weight,
-                 "--data-root",data,"--split",split.name,"--output",report],repo,env,work/"micro.log")
-            micro[bucket]=json.loads(report.read_text()); shutil.rmtree(work)
+                 "--data-root",data,"--split",split.name,"--output",report],
+                repo,task_env,work/"micro.log")
+            result = json.loads(report.read_text()); result["physical_gpu"] = gpu
+            report.write_text(json.dumps(result, indent=2) + "\n")
+            shutil.rmtree(work)
+            return bucket, result
+
+        with ThreadPoolExecutor(max_workers=len(micro_gpus)) as pool:
+            futures = [pool.submit(run_micro, job) for job in micro_jobs]
+            for future in as_completed(futures):
+                bucket, result = future.result(); micro[bucket] = result
+                print(f"micro bucket {bucket} completed on GPU {result['physical_gpu']}", flush=True)
     (output/"micro_summary.json").write_text(json.dumps(micro,indent=2)+"\n")
 
     env_info={"timestamp":time.strftime("%Y-%m-%dT%H:%M:%S%z"),
